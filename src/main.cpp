@@ -51,6 +51,7 @@ int eeprom_write(config_t configs) {
 
 String command(uint8_t *payload) {
   String cmd = (const char *)payload;
+  cmd.toLowerCase();
   String msg = "";
 
   // Set pid control parameter and status command
@@ -280,6 +281,8 @@ void setup() {
   delay(3000);
   motor.write(0);
   Serial.println("Motor calibration complete");
+
+  Serial.println("System ready");
 }
 
 void loop() {
