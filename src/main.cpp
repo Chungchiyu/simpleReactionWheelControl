@@ -8,19 +8,19 @@
 
 typedef struct CONFIG {
   bool not_first_time = false;
-  unsigned long motor_on_time = 0;
-  unsigned long motor_off_time = 0;
-  float launch_Gforce = 0;
-  unsigned long pid_on_time = 0;
+  unsigned long motor_on_time = 10000;
+  unsigned long motor_off_time = 60000;
+  float launch_Gforce = 5;
+  unsigned long pid_on_time = 5000;
   bool pid_dir = 0;
   bool pid_delay_on_boot = false;
   double kp = 0, ki = 0, kd = 0;
   double gy_target = 0;
-  double motor_init_speed = 0;
-  uint8_t motor_raw_max_speed = 180;
+  double motor_init_speed = 20;
+  uint8_t motor_raw_max_speed = 60;
 } config_t;
 
-enum STATE { UNKONWN, INIT, IDLE, PRELAUNCH, LAUNCH, STOP };
+enum STATE { UNKONWN, INIT, PRELAUNCH, AIRBORNE, STOPPING };
 typedef struct _STATUS {
   STATE state = UNKONWN;
   bool pid_on = false;
@@ -35,6 +35,32 @@ WebSocketsServer webSocket = WebSocketsServer(81);
 const char *ssid = "ESP reaction wheel";
 const char *pwd = "America~FUCKYEAH";
 Servo motor;
+MPU6050 imu;
+unsigned long timer, start_time;
+bool streaming = false;
+int print_freq = 10;
+
+void imu_init() {
+  Wire.begin();
+
+  // initialize device
+  Serial.println("Initializing I2C devices...");
+  imu.setFullScaleAccelRange(3);
+  imu.setFullScaleGyroRange(3);
+  imu.initialize();
+
+  // verify connection
+  Serial.println("Testing device connections...");
+  Serial.println(imu.testConnection() ? "MPU6050 connection successful"
+                                      : "MPU6050 connection failed");
+}
+
+void imu_calibrate() {
+  imu.CalibrateAccel(6);
+  imu.CalibrateGyro(6);
+  Serial.println("\nat 600 Readings");
+  imu.PrintActiveOffsets();
+}
 
 int eeprom_read(config_t *configs) {
   uint8_t *ptr = (uint8_t *)(configs);
@@ -184,6 +210,14 @@ String command(uint8_t *payload) {
     eeprom_write(config_reset);
     eeprom_read(&config);
     msg = "format all configuration";
+  } else if (cmd == "calibrate") {
+    imu_calibrate();
+  } else if (cmd == "init") {
+
+  } else if (cmd == "stream") {
+    streaming = true;
+  } else if (cmd == "nostream") {
+    streaming = false;
   } else {
     msg = cmd + ": no such command";
   }
@@ -244,6 +278,36 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload,
   }
 }
 
+void stream() {
+  static auto t_now = millis();
+  if (timer - t_now > (100) && streaming) {
+    String msg = "";
+    msg += "ax: " + String(imu.getAccelerationX()) +
+           "\tay: " + imu.getAccelerationY() +
+           "\taz: " + imu.getAccelerationZ();
+    msg += "\tgx: " + String(imu.getRotationX()) +
+           "\tgy: " + imu.getRotationY() + "\tgz: " + imu.getRotationZ();
+    Serial.println(msg);
+    // webSocket.broadcastTXT(msg);
+
+    t_now = millis();
+  }
+}
+
+bool launch_detection() {
+  float acc = (float) imu.getAccelerationZ() / 32768.0f * 16;
+  // if(acc > config.launch_Gforce) {
+  //   return true;
+  // }
+
+  static auto now_t = millis();
+  if(timer - now_t > 1000) {
+    Serial.println(acc);
+    now_t = millis();
+  }
+  return false;
+}
+
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
@@ -277,17 +341,70 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
+  imu_init();
+  imu_calibrate();
+
   // Delay for calibrate ESC
-  delay(3000);
   motor.write(0);
   Serial.println("Motor calibration complete");
 
   Serial.println("System ready");
+
+  start_time = millis();
+  status.state = INIT;
+  Serial.println("state: INIT");
 }
+
+unsigned long init_time, prelaunch_time, airborne_time, stopping_time;
 
 void loop() {
   // put your main code here, to run repeatedly:
+  timer = millis();
+
   webSocket.loop();
 
   deSpinControl(status.pid_on);
+
+  stream();
+
+  // The state machine
+  switch (status.state) {
+  case INIT:
+    init_time = timer - start_time;
+    if (init_time > config.motor_on_time) {
+      motor.write(config.motor_init_speed);
+      status.state = PRELAUNCH;
+      Serial.println("state: PRELAUNCH");
+    }
+    break;
+  case PRELAUNCH:
+    prelaunch_time = timer - init_time;
+    if (config.pid_delay_on_boot) {
+      if (prelaunch_time > config.pid_on_time) {
+        status.pid_on = true;
+      }
+    }
+    if(launch_detection()){
+      status.state = AIRBORNE;
+      Serial.println("state: AIRBORNE");
+    }
+    break;
+  case AIRBORNE:
+    airborne_time = timer - prelaunch_time;
+    if(!config.pid_delay_on_boot) {
+      if (airborne_time > config.pid_on_time) {
+        status.pid_on = true;
+      }
+    }
+    if(airborne_time > config.motor_off_time) {
+      status.state = STOPPING;
+      Serial.println("state: STOPPING");
+      status.pid_on = false;
+      motor.write(0);
+    }
+    break;
+  case STOPPING:
+    stopping_time = timer - airborne_time;
+    break;
+  }
 }
