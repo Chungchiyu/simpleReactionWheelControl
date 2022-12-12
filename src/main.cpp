@@ -18,6 +18,8 @@ typedef struct CONFIG {
   double gy_target = 0;
   double motor_init_speed = 20;
   uint8_t motor_raw_max_speed = 60;
+
+  bool test_mode = false;
 } config_t;
 
 enum STATE { UNKONWN, INIT, PRELAUNCH, AIRBORNE, STOPPING };
@@ -218,6 +220,12 @@ String command(uint8_t *payload) {
     streaming = true;
   } else if (cmd == "nostream") {
     streaming = false;
+  } else if (cmd == "test") {
+    config.test_mode = true;
+    msg = "you are in test mode now";
+  } else if (cmd == "official") {
+    config.test_mode = false;
+    msg = "you are in official mode now";
   } else {
     msg = cmd + ": no such command";
   }
@@ -295,13 +303,13 @@ void stream() {
 }
 
 bool launch_detection() {
-  float acc = (float) imu.getAccelerationZ() / 32768.0f * 16;
+  float acc = (float)imu.getAccelerationZ() / 32768.0f * 16;
   // if(acc > config.launch_Gforce) {
   //   return true;
   // }
 
   static auto now_t = millis();
-  if(timer - now_t > 1000) {
+  if (timer - now_t > 1000) {
     Serial.println(acc);
     now_t = millis();
   }
@@ -348,7 +356,8 @@ void setup() {
   motor.write(0);
   Serial.println("Motor calibration complete");
 
-  Serial.println("System ready");
+  Serial.print("System ready:");
+  Serial.println(config.test_mode ? "test mode" : "official mode");
 
   start_time = millis();
   status.state = INIT;
@@ -367,44 +376,46 @@ void loop() {
 
   stream();
 
-  // The state machine
-  switch (status.state) {
-  case INIT:
-    init_time = timer - start_time;
-    if (init_time > config.motor_on_time) {
-      motor.write(config.motor_init_speed);
-      status.state = PRELAUNCH;
-      Serial.println("state: PRELAUNCH");
-    }
-    break;
-  case PRELAUNCH:
-    prelaunch_time = timer - init_time;
-    if (config.pid_delay_on_boot) {
-      if (prelaunch_time > config.pid_on_time) {
-        status.pid_on = true;
+  if (config.test_mode) {
+    // The state machine
+    switch (status.state) {
+    case INIT:
+      init_time = timer - start_time;
+      if (init_time > config.motor_on_time) {
+        motor.write(config.motor_init_speed);
+        status.state = PRELAUNCH;
+        Serial.println("state: PRELAUNCH");
       }
-    }
-    if(launch_detection()){
-      status.state = AIRBORNE;
-      Serial.println("state: AIRBORNE");
-    }
-    break;
-  case AIRBORNE:
-    airborne_time = timer - prelaunch_time;
-    if(!config.pid_delay_on_boot) {
-      if (airborne_time > config.pid_on_time) {
-        status.pid_on = true;
+      break;
+    case PRELAUNCH:
+      prelaunch_time = timer - init_time;
+      if (config.pid_delay_on_boot) {
+        if (prelaunch_time > config.pid_on_time) {
+          status.pid_on = true;
+        }
       }
+      if (launch_detection()) {
+        status.state = AIRBORNE;
+        Serial.println("state: AIRBORNE");
+      }
+      break;
+    case AIRBORNE:
+      airborne_time = timer - prelaunch_time;
+      if (!config.pid_delay_on_boot) {
+        if (airborne_time > config.pid_on_time) {
+          status.pid_on = true;
+        }
+      }
+      if (airborne_time > config.motor_off_time) {
+        status.state = STOPPING;
+        Serial.println("state: STOPPING");
+        status.pid_on = false;
+        motor.write(0);
+      }
+      break;
+    case STOPPING:
+      stopping_time = timer - airborne_time;
+      break;
     }
-    if(airborne_time > config.motor_off_time) {
-      status.state = STOPPING;
-      Serial.println("state: STOPPING");
-      status.pid_on = false;
-      motor.write(0);
-    }
-    break;
-  case STOPPING:
-    stopping_time = timer - airborne_time;
-    break;
   }
 }
