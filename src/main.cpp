@@ -27,12 +27,13 @@ typedef struct _STATUS {
   STATE state = UNKONWN;
   bool pid_on = false;
   int motor_speed = 0;
+  double rocket_angular_speed = 0;
 } status_t;
 
 config_t config;
 status_t status;
 PID *pid;
-double gy_input = 0, motor_output = 0;
+double gyro_input = 0, motor_output = 0;
 WebSocketsServer webSocket = WebSocketsServer(81);
 const char *ssid = "ESP reaction wheel";
 const char *pwd = "America~FUCKYEAH";
@@ -41,6 +42,8 @@ MPU6050 imu;
 unsigned long timer, start_time;
 bool streaming = false;
 int print_freq = 10;
+
+double ax, ay, az, gx, gy, gz;
 
 void imu_init() {
   Wire.begin();
@@ -174,7 +177,7 @@ String command(uint8_t *payload) {
     msg += "pid is " + String(status.pid_on ? "on" : "off") + "\n";
     msg += "motor is at " + String(status.motor_speed) + "% speed\n";
     msg += "pid last output is " + String(motor_output) + "% speed\n";
-    msg += "rocket is at " + String(123) + " rpm\n";
+    msg += "rocket is at " + String(status.rocket_angular_speed) + " rpm\n";
   } else if (cmd.substring(0, 6) == "config") {
     if (cmd.substring(7, 12) == "motor" || cmd.substring(6).isEmpty()) {
       msg += "motor maximum speed is " + String(config.motor_raw_max_speed) +
@@ -240,10 +243,21 @@ String command(uint8_t *payload) {
   return msg;
 }
 
+void updateIMU() {
+  ax = ((double)imu.getAccelerationX()) / 32768 * 16;
+  ay = ((double)imu.getAccelerationY()) / 32768 * 16;
+  az = ((double)imu.getAccelerationZ()) / 32768 * 16;
+  gx = ((double)imu.getRotationX()) / 32768 * 2000 / 360 * 60;
+  gy = ((double)imu.getRotationY()) / 32768 * 2000 / 360 * 60;
+  gz = ((double)imu.getRotationZ()) / 32768 * 2000 / 360 * 60;
+  status.rocket_angular_speed = gz; // you can change to gx or gy, it depends on
+                                    // what orientation you install your imu
+}
+
 void deSpinControl(bool ON) {
   if (ON) {
     pid->SetMode(ON);
-    // gy_input = (double) sensor.getGyro().y;
+    gyro_input = status.rocket_angular_speed;
     pid->Compute();
     double output = config.motor_init_speed + config.gy_target;
     output = output > 100 ? 100 : output;
@@ -336,7 +350,7 @@ void setup() {
   motor.write(config.motor_raw_max_speed);
   Serial.println("Calibrating motor...");
 
-  pid = new PID(&gy_input, &motor_output, &config.gy_target, config.kp,
+  pid = new PID(&gyro_input, &motor_output, &config.gy_target, config.kp,
                 config.ki, config.kd, P_ON_M, config.pid_dir);
 
   WiFi.softAP(ssid, pwd);
@@ -369,6 +383,8 @@ unsigned long init_time, prelaunch_time, airborne_time, stopping_time;
 void loop() {
   // put your main code here, to run repeatedly:
   timer = millis();
+
+  updateIMU();
 
   webSocket.loop();
 
