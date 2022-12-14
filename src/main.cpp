@@ -13,7 +13,7 @@ typedef struct CONFIG {
   float launch_Gforce = 5;
   unsigned long pid_on_time = 5000;
   bool pid_dir = 0;
-  bool pid_delay_on_boot = false;
+  bool pid_delay_on_boot = true;
   double kp = 0, ki = 0, kd = 0;
   double gy_target = 0;
   double motor_init_speed = 20;
@@ -28,6 +28,7 @@ typedef struct _STATUS {
   bool pid_on = false;
   int motor_speed = 0;
   double rocket_angular_speed = 0;
+  bool imu_ready = false;
 } status_t;
 
 config_t config;
@@ -45,7 +46,7 @@ int print_freq = 10;
 
 double ax, ay, az, gx, gy, gz;
 
-void imu_init() {
+bool imu_init() {
   Wire.begin();
 
   // initialize device
@@ -58,6 +59,7 @@ void imu_init() {
   Serial.println("Testing device connections...");
   Serial.println(imu.testConnection() ? "MPU6050 connection successful"
                                       : "MPU6050 connection failed");
+  return imu.testConnection;
 }
 
 void imu_calibrate() {
@@ -132,7 +134,9 @@ String command(uint8_t *payload) {
   // set motor configuration or action command
   else if (cmd.substring(0, 11) == "motor speed") {
     int temp = cmd.substring(11).toInt();
-    if (temp < 0 || temp > 100)
+    if (status.pid_on) {
+      msg = "You cannot change motor speed while pid is on";
+    } else if (temp < 0 || temp > 100)
       msg = "can not be less than 0% or over 100%";
     else {
       status.motor_speed = temp;
@@ -225,10 +229,10 @@ String command(uint8_t *payload) {
     streaming = false;
   } else if (cmd == "test") {
     config.test_mode = true;
-    msg = "you are in test mode now";
+    msg = "/you are in test mode now";
   } else if (cmd == "official") {
     config.test_mode = false;
-    msg = "you are in official mode now";
+    msg = "/you are in official mode now";
   } else {
     msg = cmd + ": no such command";
   }
@@ -318,9 +322,9 @@ void stream() {
 
 bool launch_detection() {
   float acc = (float)imu.getAccelerationZ() / 32768.0f * 16;
-  // if(acc > config.launch_Gforce) {
-  //   return true;
-  // }
+  if (acc > config.launch_Gforce) {
+    return true;
+  }
 
   static auto now_t = millis();
   if (timer - now_t > 1000) {
@@ -363,19 +367,24 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
-  imu_init();
-  imu_calibrate();
+  webSocket.broadcastTXT("IMU calibrating...");
+  if (imu_init()) {
+    imu_calibrate();
+    status.imu_ready = true;
+    webSocket.broadcastTXT("IMU calibration complete");
+  } else {
+    config.pid_delay_on_boot = true;
+  }
 
   // Delay for calibrate ESC
   motor.write(0);
   Serial.println("Motor calibration complete");
+  webSocket.broadcastTXT("Motor calibration complete");
 
   Serial.print("System ready:");
   Serial.println(config.test_mode ? "test mode" : "official mode");
-
-  start_time = millis();
-  status.state = INIT;
-  Serial.println("state: INIT");
+  webSocket.broadcastTXT("System ready");
+  webSocket.broadcastTXT(config.test_mode ? "test mode" : "official mode");
 }
 
 unsigned long init_time, prelaunch_time, airborne_time, stopping_time;
@@ -395,12 +404,18 @@ void loop() {
   if (config.test_mode) {
     // The state machine
     switch (status.state) {
+    case UNKONWN:
+      start_time = millis();
+      status.state = INIT;
+      Serial.println("state: INIT");
+      webSocket.broadcastTXT("state: INIT");
     case INIT:
       init_time = timer - start_time;
       if (init_time > config.motor_on_time) {
         motor.write(config.motor_init_speed);
         status.state = PRELAUNCH;
         Serial.println("state: PRELAUNCH");
+        webSocket.broadcastTXT("state: PRELAUNCH");
       }
       break;
     case PRELAUNCH:
@@ -408,11 +423,16 @@ void loop() {
       if (config.pid_delay_on_boot) {
         if (prelaunch_time > config.pid_on_time) {
           status.pid_on = true;
+          status.state = AIRBORNE;
+          Serial.println("state: AIRBORNE");
+          webSocket.broadcastTXT("state: AIRBRONE");
         }
-      }
-      if (launch_detection()) {
-        status.state = AIRBORNE;
-        Serial.println("state: AIRBORNE");
+      } else {
+        if (launch_detection()) {
+          status.state = AIRBORNE;
+          Serial.println("state: AIRBORNE");
+          webSocket.broadcastTXT("state: AIRBRONE");
+        }
       }
       break;
     case AIRBORNE:
@@ -425,6 +445,7 @@ void loop() {
       if (airborne_time > config.motor_off_time) {
         status.state = STOPPING;
         Serial.println("state: STOPPING");
+        webSocket.broadcastTXT("state: STOPPING");
         status.pid_on = false;
         motor.write(0);
       }
