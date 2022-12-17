@@ -17,7 +17,7 @@ typedef struct CONFIG {
   bool pid_delay_on_boot = true;
   double kp = 0, ki = 0, kd = 0;
   double gy_target = 0;
-  double motor_init_speed = 20;
+  double motor_init_speed = 50;
   uint8_t motor_raw_max_speed = 60;
 
   bool test_mode = false;
@@ -347,7 +347,7 @@ void stream() {
 }
 
 bool launch_detection() {
-  float acc = sqrt((float) (ax * ax + ay * ay + az * az));
+  float acc = sqrt(fabs((float)(ax * ax)) + fabs((float)(ay * ay)) + fabs((float)(az * az)));
   if (acc > config.launch_Gforce) {
     return true;
   }
