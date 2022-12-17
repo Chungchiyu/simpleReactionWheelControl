@@ -2,7 +2,7 @@
 #include <EEPROM.h>
 #include <MPU6050.h>
 #include <PID_v1.h>
-#include <Servo.h>
+#include <ESP32Servo.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 
@@ -22,9 +22,9 @@ typedef struct CONFIG {
   bool test_mode = false;
 } config_t;
 
-enum STATE { UNKONWN, INIT, PRELAUNCH, AIRBORNE, STOPPING };
+enum STATE { UNKNOWN, INIT, PRELAUNCH, AIRBORNE, STOPPING };
 typedef struct _STATUS {
-  STATE state = UNKONWN;
+  STATE state = UNKNOWN;
   bool pid_on = false;
   int motor_speed = 0;
   double rocket_angular_speed = 0;
@@ -51,15 +51,16 @@ bool imu_init() {
 
   // initialize device
   Serial.println("Initializing I2C devices...");
-  imu.setFullScaleAccelRange(3);
-  imu.setFullScaleGyroRange(3);
-  imu.initialize();
+  imu.setClockSource( (MPU6050_IMU::MPU6050_CLOCK_PLL_XGYRO));
+  imu.setFullScaleGyroRange( (MPU6050_IMU::MPU6050_GYRO_FS_2000));
+  imu.setFullScaleAccelRange( (MPU6050_IMU::MPU6050_ACCEL_FS_16));
+  imu.setSleepEnabled(false); // thanks to Jack Elston for pointing this one out!
 
   // verify connection
   Serial.println("Testing device connections...");
   Serial.println(imu.testConnection() ? "MPU6050 connection successful"
                                       : "MPU6050 connection failed");
-  return imu.testConnection;
+  return imu.testConnection();
 }
 
 void imu_calibrate() {
@@ -222,7 +223,10 @@ String command(uint8_t *payload) {
   } else if (cmd == "calibrate") {
     imu_calibrate();
   } else if (cmd == "init") {
-
+    status.state = UNKNOWN;
+    motor.write(0);
+    status.pid_on = false;
+    msg = "initialize complete";
   } else if (cmd == "stream") {
     streaming = true;
   } else if (cmd == "nostream") {
@@ -256,6 +260,20 @@ void updateIMU() {
   gz = ((double)imu.getRotationZ()) / 32768 * 2000 / 360 * 60;
   status.rocket_angular_speed = gz; // you can change to gx or gy, it depends on
                                     // what orientation you install your imu
+}
+
+void serialInput()
+{
+  if(Serial.available()){
+    char c;
+    static String cmd = "";
+    if((c = Serial.read()) != '\n'){
+      cmd += c;
+    } else {
+      command((uint8_t *)cmd.c_str());
+      cmd = "";
+    }
+  }
 }
 
 void deSpinControl(bool ON) {
@@ -369,7 +387,7 @@ void setup() {
 
   webSocket.broadcastTXT("IMU calibrating...");
   if (imu_init()) {
-    imu_calibrate();
+    // imu_calibrate();
     status.imu_ready = true;
     webSocket.broadcastTXT("IMU calibration complete");
   } else {
@@ -393,6 +411,8 @@ void loop() {
   // put your main code here, to run repeatedly:
   timer = millis();
 
+  serialInput();
+
   updateIMU();
 
   webSocket.loop();
@@ -401,11 +421,11 @@ void loop() {
 
   stream();
 
-  if (config.test_mode) {
+  if (!config.test_mode) {
     // The state machine
     switch (status.state) {
-    case UNKONWN:
-      start_time = millis();
+    case UNKNOWN:
+      start_time = timer;
       status.state = INIT;
       Serial.println("state: INIT");
       webSocket.broadcastTXT("state: INIT");
@@ -416,6 +436,7 @@ void loop() {
         status.state = PRELAUNCH;
         Serial.println("state: PRELAUNCH");
         webSocket.broadcastTXT("state: PRELAUNCH");
+        init_time = timer;
       }
       break;
     case PRELAUNCH:
@@ -426,12 +447,14 @@ void loop() {
           status.state = AIRBORNE;
           Serial.println("state: AIRBORNE");
           webSocket.broadcastTXT("state: AIRBRONE");
+          prelaunch_time = timer;
         }
       } else {
         if (launch_detection()) {
           status.state = AIRBORNE;
           Serial.println("state: AIRBORNE");
           webSocket.broadcastTXT("state: AIRBRONE");
+          prelaunch_time = timer;
         }
       }
       break;
@@ -448,6 +471,7 @@ void loop() {
         webSocket.broadcastTXT("state: STOPPING");
         status.pid_on = false;
         motor.write(0);
+        airborne_time = timer;
       }
       break;
     case STOPPING:
