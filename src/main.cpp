@@ -1,10 +1,11 @@
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <ESP32Servo.h>
 #include <MPU6050.h>
 #include <PID_v1.h>
-#include <ESP32Servo.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+
 
 typedef struct CONFIG {
   bool not_first_time = false;
@@ -51,10 +52,11 @@ bool imu_init() {
 
   // initialize device
   Serial.println("Initializing I2C devices...");
-  imu.setClockSource( (MPU6050_IMU::MPU6050_CLOCK_PLL_XGYRO));
-  imu.setFullScaleGyroRange( (MPU6050_IMU::MPU6050_GYRO_FS_2000));
-  imu.setFullScaleAccelRange( (MPU6050_IMU::MPU6050_ACCEL_FS_16));
-  imu.setSleepEnabled(false); // thanks to Jack Elston for pointing this one out!
+  imu.setClockSource((MPU6050_IMU::MPU6050_CLOCK_PLL_XGYRO));
+  imu.setFullScaleGyroRange((MPU6050_IMU::MPU6050_GYRO_FS_2000));
+  imu.setFullScaleAccelRange((MPU6050_IMU::MPU6050_ACCEL_FS_16));
+  imu.setSleepEnabled(
+      false); // thanks to Jack Elston for pointing this one out!
 
   // verify connection
   Serial.println("Testing device connections...");
@@ -183,6 +185,7 @@ String command(uint8_t *payload) {
     msg += "motor is at " + String(status.motor_speed) + "% speed\n";
     msg += "pid last output is " + String(motor_output) + "% speed\n";
     msg += "rocket is at " + String(status.rocket_angular_speed) + " rpm\n";
+    msg += "imu is " + status.imu_ready ? "ready" : "not ready, please restart";
   } else if (cmd.substring(0, 6) == "config") {
     if (cmd.substring(7, 12) == "motor" || cmd.substring(6).isEmpty()) {
       msg += "motor maximum speed is " + String(config.motor_raw_max_speed) +
@@ -235,6 +238,12 @@ String command(uint8_t *payload) {
     config.test_mode = true;
     msg = "/you are in test mode now";
   } else if (cmd == "official") {
+    if (config.test_mode) {
+      status.state = UNKNOWN;
+      motor.write(0);
+      status.pid_on = false;
+      msg = "initialize complete";
+    }
     config.test_mode = false;
     msg = "/you are in official mode now";
   } else {
@@ -262,12 +271,11 @@ void updateIMU() {
                                     // what orientation you install your imu
 }
 
-void serialInput()
-{
-  if(Serial.available()){
+void serialInput() {
+  if (Serial.available()) {
     char c;
     static String cmd = "";
-    if((c = Serial.read()) != '\n'){
+    if ((c = Serial.read()) != '\n') {
       cmd += c;
     } else {
       command((uint8_t *)cmd.c_str());
@@ -339,7 +347,7 @@ void stream() {
 }
 
 bool launch_detection() {
-  float acc = (float)imu.getAccelerationZ() / 32768.0f * 16;
+  float acc = sqrt((float) (ax * ax + ay * ay + az * az));
   if (acc > config.launch_Gforce) {
     return true;
   }
@@ -387,7 +395,7 @@ void setup() {
 
   webSocket.broadcastTXT("IMU calibrating...");
   if (imu_init()) {
-    // imu_calibrate();
+    imu_calibrate();
     status.imu_ready = true;
     webSocket.broadcastTXT("IMU calibration complete");
   } else {
